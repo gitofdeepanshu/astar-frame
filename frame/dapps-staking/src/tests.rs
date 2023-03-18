@@ -1833,6 +1833,77 @@ fn check_remove_all_delegatee_for_delegator() {
     
 }
 
+#[test]
+fn set_delegatee_is_ok() {
+    ExternalityBuilder::build().execute_with(|| {
+        initialize_first_block();
+
+        let first_developer = 1;
+        
+        let first_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        
+        let alice =1;
+        let bob = 2;
+        
+        // Contract must be registered is order to set delegatee
+        assert_noop!(DappsStaking::set_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id,
+            bob
+        ),Error::<TestRuntime>::NotOperatedContract);
+        
+        assert_register(first_developer, &first_contract_id);
+
+        assert!(DappsStaking::set_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id,
+            bob
+        ).is_ok());
+
+        assert_eq!(DelegateInfo::<TestRuntime>::get(&alice,&first_contract_id).unwrap(),bob);
+
+    })
+}
+
+#[test]
+fn remove_delegatee_is_ok() {
+    ExternalityBuilder::build().execute_with(|| {
+        initialize_first_block();
+
+        let first_developer = 1;
+        
+        let first_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        
+        let alice =1;
+        let bob = 2;
+        
+        //check can't remove until registered
+
+        assert_noop!(DappsStaking::remove_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id
+        ),
+        Error::<TestRuntime>::DelegateeAccountNotSetForContract);
+
+        assert_register(first_developer, &first_contract_id);
+
+        assert!(DappsStaking::set_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id,
+            bob
+        ).is_ok());
+
+        assert!(DappsStaking::remove_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id
+        ).is_ok());
+
+        assert!(!DelegateInfo::<TestRuntime>::contains_key(&alice,&first_contract_id ));
+
+    })
+}
 
 #[test]
 fn claim_after_unregister_is_ok() {
