@@ -28,6 +28,8 @@ use sp_runtime::{
 use sp_std::{convert::From, mem};
 
 const STAKING_ID: LockIdentifier = *b"dapstake";
+
+// to limit abuse and save from cyclic dependency when traversing the final delegatee_address
 const MAX_DEPTH_FOR_DELEGATION: u8 = 5;
 #[frame_support::pallet]
 #[allow(clippy::module_inception)]
@@ -186,7 +188,7 @@ pub mod pallet {
         ContractStakeInfo<BalanceOf<T>>,
     >;
 
-    /// Info about stakers stakes on particular contracts.
+    /// Info about delegatee address for (delegtor_address,contract_id) pair
     #[pallet::storage]
     #[pallet::getter(fn delegate_info)]
     pub type DelegateInfo<T: Config> = StorageDoubleMap<
@@ -199,6 +201,7 @@ pub mod pallet {
         OptionQuery,
     >;
 
+    /// Info about stakers stakes on particular contracts.
     #[pallet::storage]
     #[pallet::getter(fn staker_info)]
     pub type GeneralStakerInfo<T: Config> = StorageDoubleMap<
@@ -739,6 +742,7 @@ pub mod pallet {
         /// The rewards are always added to the staker's free balance (account) but depending on the reward destination configuration,
         /// they might be immediately re-staked.
         #[pallet::call_index(7)]
+        // #[pallet::weight(T::WeightInfo::claim_staker_with_restake().max(T::WeightInfo::claim_staker_without_restake()).max(T::WeightInfo::claim_staker_with_delegate()))]
         #[pallet::weight(T::WeightInfo::claim_staker_with_restake().max(T::WeightInfo::claim_staker_without_restake()))]
         pub fn claim_staker(
             origin: OriginFor<T>,
@@ -837,6 +841,14 @@ pub mod pallet {
             T::Currency::resolve_creating(&final_reward_claimee, reward_imbalance);
             Self::update_staker_info(&staker, &contract_id, staker_info);
             Self::deposit_event(Event::<T>::Reward(staker, contract_id, era, staker_reward));
+
+            // Ok(Some(if should_restake_reward {
+            //     T::WeightInfo::claim_staker_with_restake()
+            // } else if reward_destination == RewardDestination::DelegateBalance {
+            //     T::WeightInfo::claim_staker_with_delegate()
+            // } else {
+            //     T::WeightInfo::claim_staker_without_restake()
+            // })
 
             Ok(Some(if should_restake_reward {
                 T::WeightInfo::claim_staker_with_restake()
@@ -1031,6 +1043,7 @@ pub mod pallet {
         /// Used to set delgatee account for a particular smart contract for caller
         #[pallet::call_index(14)]
         #[pallet::weight(0)]
+        // #[pallet::weight(T::WeightInfo::set_delegatee())]
         pub fn set_delegatee(
             origin: OriginFor<T>,
             contract_id: T::SmartContract,
@@ -1047,6 +1060,7 @@ pub mod pallet {
         /// Used to remove delegatee account from DelegateInfo
         #[pallet::call_index(15)]
         #[pallet::weight(0)]
+        // #[pallet::weight(T::WeightInfo::remove_delegatee())]
         pub fn remove_delegatee(
             origin: OriginFor<T>,
             contract_id: T::SmartContract
