@@ -29,6 +29,8 @@ use sp_std::{convert::From, mem};
 
 const STAKING_ID: LockIdentifier = *b"dapstake";
 
+// to limit abuse and save from cyclic dependency when traversing the final delegatee_address
+const MAX_DEPTH_FOR_DELEGATION: u8 = 5;
 #[frame_support::pallet]
 #[allow(clippy::module_inception)]
 pub mod pallet {
@@ -186,6 +188,19 @@ pub mod pallet {
         ContractStakeInfo<BalanceOf<T>>,
     >;
 
+    /// Info about delegatee address for (delegtor_address,contract_id) pair
+    #[pallet::storage]
+    #[pallet::getter(fn delegate_info)]
+    pub type DelegateInfo<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        Blake2_128Concat,
+        T::SmartContract,
+        T::AccountId,
+        OptionQuery,
+    >;
+
     /// Info about stakers stakes on particular contracts.
     #[pallet::storage]
     #[pallet::getter(fn staker_info)]
@@ -240,6 +255,10 @@ pub mod pallet {
         ///
         /// \(developer account, smart contract, era, amount burned\)
         StaleRewardBurned(T::AccountId, T::SmartContract, EraIndex, BalanceOf<T>),
+        /// Delegator set to another account
+        DelegatorSet(T::AccountId, T::SmartContract, T::AccountId),
+        /// Delegatee Removed
+        DelegateeRemoved(T::AccountId, T::SmartContract, T::AccountId)
     }
 
     #[pallet::error]
@@ -292,6 +311,16 @@ pub mod pallet {
         NotActiveStaker,
         /// Transfering nomination to the same contract
         NominationTransferToSameContract,
+        /// Delegating to self not allowed
+        SelfDelegationNotAllowed,
+        /// Delegatee must exist in orde to remove it
+        DelegateeDoesntExist,
+        /// Can't set reward destination to already existing destination
+        SameRewardDestinationNotAllowed,
+        /// Reward Destination for an account must be DelegateBalance in order to set delegatee
+        RewardDestinationNotDelegate,
+        /// Delegatee account must be for contract for claiming rewards
+        DelegateeAccountNotSetForContract,
     }
 
     #[pallet::hooks]
@@ -713,6 +742,7 @@ pub mod pallet {
         /// The rewards are always added to the staker's free balance (account) but depending on the reward destination configuration,
         /// they might be immediately re-staked.
         #[pallet::call_index(7)]
+        // #[pallet::weight(T::WeightInfo::claim_staker_with_restake().max(T::WeightInfo::claim_staker_without_restake()).max(T::WeightInfo::claim_staker_with_delegate()))]
         #[pallet::weight(T::WeightInfo::claim_staker_with_restake().max(T::WeightInfo::claim_staker_without_restake()))]
         pub fn claim_staker(
             origin: OriginFor<T>,
@@ -747,8 +777,10 @@ pub mod pallet {
 
             let mut ledger = Self::ledger(&staker);
 
+            let reward_destination = ledger.reward_destination;
+
             let should_restake_reward = Self::should_restake_reward(
-                ledger.reward_destination,
+                reward_destination,
                 dapp_info.state,
                 staker_info.latest_staked_value(),
             );
@@ -799,9 +831,24 @@ pub mod pallet {
                 ));
             }
 
-            T::Currency::resolve_creating(&staker, reward_imbalance);
+            // Reward willbe transferred to either Staker or the account staker delegated to
+            let mut final_reward_claimee = staker.clone();
+
+            if reward_destination == RewardDestination::DelegateBalance {
+                final_reward_claimee = Self::check_delegate(staker.clone(), contract_id.clone())?;
+            }
+
+            T::Currency::resolve_creating(&final_reward_claimee, reward_imbalance);
             Self::update_staker_info(&staker, &contract_id, staker_info);
             Self::deposit_event(Event::<T>::Reward(staker, contract_id, era, staker_reward));
+
+            // Ok(Some(if should_restake_reward {
+            //     T::WeightInfo::claim_staker_with_restake()
+            // } else if reward_destination == RewardDestination::DelegateBalance {
+            //     T::WeightInfo::claim_staker_with_delegate()
+            // } else {
+            //     T::WeightInfo::claim_staker_without_restake()
+            // })
 
             Ok(Some(if should_restake_reward {
                 T::WeightInfo::claim_staker_with_restake()
@@ -900,10 +947,18 @@ pub mod pallet {
             reward_destination: RewardDestination,
         ) -> DispatchResultWithPostInfo {
             Self::ensure_pallet_enabled()?;
-            let staker = ensure_signed(origin)?;
+            let staker = ensure_signed(origin.clone())?;
             let mut ledger = Self::ledger(&staker);
 
             ensure!(!ledger.is_empty(), Error::<T>::NotActiveStaker);
+
+            ensure!(reward_destination != ledger.reward_destination, Error::<T>::SameRewardDestinationNotAllowed);
+
+            // if current reward_destionation is RewardDestination::DelegateBalance and staker wants tot change it so have to remove 
+            // delegate info from mapping (for safety) (optional feature)
+            if ledger.reward_destination == RewardDestination::DelegateBalance {
+                Self::remove_all_delegatee_for_delegator(staker.clone())?;
+            }
 
             // this is done directly instead of using update_ledger helper
             // because there's no need to interact with the Currency locks
@@ -982,6 +1037,38 @@ pub mod pallet {
                 dapp_reward,
             ));
 
+            Ok(().into())
+        }
+
+        /// Used to set delgatee account for a particular smart contract for caller
+        #[pallet::call_index(14)]
+        #[pallet::weight(0)]
+        // #[pallet::weight(T::WeightInfo::set_delegatee())]
+        pub fn set_delegatee(
+            origin: OriginFor<T>,
+            contract_id: T::SmartContract,
+            delegatee_address: T::AccountId,
+        ) -> DispatchResultWithPostInfo {
+            Self::ensure_pallet_enabled()?;
+
+            let delegator_address = ensure_signed(origin)?;
+            Self::set_delegatee_info(delegator_address,contract_id,delegatee_address)?;
+
+            Ok(().into())
+        }
+
+        /// Used to remove delegatee account from DelegateInfo
+        #[pallet::call_index(15)]
+        #[pallet::weight(0)]
+        // #[pallet::weight(T::WeightInfo::remove_delegatee())]
+        pub fn remove_delegatee(
+            origin: OriginFor<T>,
+            contract_id: T::SmartContract
+        ) -> DispatchResultWithPostInfo {
+            Self::ensure_pallet_enabled()?;
+
+            let delegator_address = ensure_signed(origin)?;
+            Self::remove_delegatee_info(delegator_address,contract_id)?;
             Ok(().into())
         }
     }
@@ -1255,6 +1342,102 @@ pub mod pallet {
                 && latest_staked_value > Zero::zero()
         }
 
+        /// return the delegatee_address if exists to the max_depth
+        /// else return the delegator address if no delegatee exists
+        pub(crate) fn check_delegate(
+            delegator_address: T::AccountId,
+            contract_id: T::SmartContract,
+        ) -> Result<T::AccountId,DispatchError> {
+
+            // delegatee account must be set in order to claim rewards
+            ensure!(DelegateInfo::<T>::contains_key(&delegator_address, &contract_id), Error::<T>::DelegateeAccountNotSetForContract);
+
+            let mut previous_address: T::AccountId = delegator_address;
+
+            // return delegatee address following the mapping in DelegateInfo upto MAX_DEPTH_FOR_DELEGATION
+            for _ in 0..MAX_DEPTH_FOR_DELEGATION {
+                if let Ok(delegatee_address) =
+                    DelegateInfo::<T>::try_get(&previous_address, &contract_id)
+                {
+                    previous_address = delegatee_address;
+                } else {
+                    return Ok(previous_address);
+                }
+            }
+
+            return Ok(previous_address);
+        }
+
+        /// add delegatee address for a caller for a given contract_id
+        pub fn set_delegatee_info(
+            delegator_address: T::AccountId, 
+            contract_id: T::SmartContract, 
+            delegatee_address: T::AccountId
+        ) -> Result<(),DispatchError> {
+
+            // check of delegating to self
+            ensure!(
+                delegator_address != delegatee_address,
+                Error::<T>::SelfDelegationNotAllowed
+            );            
+
+            //check if contract is registered dapp
+            ensure!(
+                RegisteredDapps::<T>::contains_key(&contract_id),
+                Error::<T>::NotOperatedContract,
+            );
+
+            DelegateInfo::<T>::insert(&delegator_address, &contract_id, &delegatee_address);
+            Self::deposit_event(Event::<T>::DelegatorSet(
+                delegator_address,
+                contract_id,
+                delegatee_address,
+            ));
+
+            Ok(())
+        }
+
+        /// add delegatee address for a caller for a given contract_id
+        pub fn remove_delegatee_info(
+            delegator_address: T::AccountId, 
+            contract_id: T::SmartContract, 
+        ) -> Result<(),DispatchError> {
+            ensure!(
+                DelegateInfo::<T>::contains_key(&delegator_address, &contract_id),
+                Error::<T>::DelegateeAccountNotSetForContract
+            );
+            let removed_delegatee_address = DelegateInfo::<T>::take(&delegator_address, &contract_id).unwrap();
+            Self::deposit_event(Event::<T>::DelegateeRemoved(
+                delegator_address,
+                contract_id,
+                removed_delegatee_address,
+            ));
+
+            Ok(())
+        }
+
+        /// removes all delegatee info for an account once RewardDestination is changed
+        pub fn remove_all_delegatee_for_delegator(
+            delegator_address: T::AccountId
+        ) -> Result<(),DispatchError> {
+            
+            let ledger = Self::ledger(&delegator_address);
+            ensure!(!ledger.is_empty(), Error::<T>::NotActiveStaker);
+
+            let contract_ids = DelegateInfo::<T>::iter_key_prefix(&delegator_address).collect::<Vec<_>>();
+            contract_ids.iter().for_each(|contract_id| 
+                {
+                let removed_delegatee_address= DelegateInfo::<T>::take(&delegator_address,contract_id).unwrap();
+                Self::deposit_event(Event::<T>::DelegateeRemoved(
+                         delegator_address.clone(),
+                         contract_id.clone(),
+                         removed_delegatee_address,
+                     ));
+                }); 
+                    
+            Ok(())
+           
+        }
         /// Calculate reward split between developer and stakers.
         ///
         /// Returns (developer reward, joint stakers reward)

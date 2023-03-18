@@ -1,51 +1,93 @@
-![astar-cover](https://user-images.githubusercontent.com/40356749/135799652-175e0d24-1255-4c26-87e8-447b192fd4b2.gif)
 
-<div align="center">
+## Add Reward Beneficiary Delegation
 
-[![Integration Action](https://github.com/AstarNetwork/Astar/workflows/Integration/badge.svg)](https://github.com/AstarNetwork/astar-frame/actions)
-[![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/AstarNetwork/Astar)](https://github.com/AstarNetwork/astar-frame/tags)
-[![Substrate version](https://img.shields.io/badge/Substrate-3.0.0-brightgreen?logo=Parity%20Substrate)](https://substrate.dev/)
-[![License](https://img.shields.io/github/license/AstarNetwork/Astar?color=green)](https://github.com/AstarNetwork/astar-frame/LICENSE)
- <br />
-[![Twitter URL](https://img.shields.io/twitter/follow/AstarNetwork?style=social)](https://twitter.com/AstarNetwork)
-[![Twitter URL](https://img.shields.io/twitter/follow/ShidenNetwork?style=social)](https://twitter.com/ShidenNetwork)
-[![YouTube](https://img.shields.io/youtube/channel/subscribers/UC36JgEF6gqatVSK9xlzzrvQ?style=social)](https://www.youtube.com/channel/UC36JgEF6gqatVSK9xlzzrvQ)
-[![Docker](https://img.shields.io/docker/pulls/staketechnologies/astar-collator?logo=docker)](https://hub.docker.com/r/staketechnologies/astar-collator)
-[![Discord](https://img.shields.io/badge/Discord-gray?logo=discord)](https://discord.gg/Z3nC9U4)
-[![Telegram](https://img.shields.io/badge/Telegram-gray?logo=telegram)](https://t.me/PlasmOfficial)
-[![Medium](https://img.shields.io/badge/Medium-gray?logo=medium)](https://medium.com/astar-network)
+## Overview
+To send the accumulated rewards to other accounts, stakers can now change the reward destination to DelegateBalance using `set_reward_destination` and then add delegatee_address using `set_delegatee` extrinsic. This must be done for all contract_id for which staker expect to receive rewards.
 
-</div>
+**WARNING: Once a staker changes RewardDestination from DelegateBalance to other, its delegatee_account information is deleted for all contract_ids and must be set up again if switched back to DelegateBalance.**
 
-Astar Network is an interoperable blockchain based the Substrate framework and the hub for dApps within the Polkadot Ecosystem.
-With Astar Network and Shiden Network, people can stake their tokens to a Smart Contract for rewarding projects that provide value to the network.
+## Modified Data Structure
+In order to delegate collected rewards to Beneficiary in DappStaking, we introduced **DelegateBalance** variant in `RewardDestination` 
+```
+pub enum RewardDestination {
+    /// Rewards are transferred to stakers free balance without any further action.
+    FreeBalance,
+    /// Rewards are transferred to stakers balance and are immediately re-staked
+    /// on the contract from which the reward was received.
+    StakeBalance,
+    /// Rewards are transfered to delegatee account's free balance
+    DelegateBalance,
+}
+```
+Keeps track of DelegateInfo 
+```
+ /// Info about delegatee address for (delegtor_address,contract_id) pair
+    #[pallet::storage]
+    #[pallet::getter(fn delegate_info)]
+    pub type DelegateInfo<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        Blake2_128Concat,
+        T::SmartContract,
+        T::AccountId,
+        OptionQuery,
+    >;
+```
 
-This repository only contains custom frame modules, for runtimes and node code please check [here](https://github.com/AstarNetwork/Astar/).
+## Alternate Approach
+The given solution works fine but we can go a step further and make code even more sophisticated by allowing users to set up `RewardDestination` per contract instead of per `AccountId`.
 
-For contributing to this project, please read our [Contribution Guideline](./CONTRIBUTING.md).
+### Modification Required:  Data Structures
+#### AccountLedger
+```
+pub struct AccountLedger<Balance: AtLeast32BitUnsigned + Default + Copy + MaxEncodedLen, T: Config> {
+    /// Total balance locked.
+    #[codec(compact)]
+    pub locked: Balance,
+    /// Information about unbonding chunks.
+    unbonding_info: UnbondingInfo<Balance>,
+    /// Instruction on how to handle reward payout
+    reward_destination_info: RewardDestintionInfo<T>,
+}
+```
+#### RewardDestinationInfo
+```
+RewardDestinationInfo<T:Config> {
+    /// reward destination per contract
+    info: Vec<(T::SmartContract, RewardDestionation)>
+}
+```
 
-## Versioning Schema
-
-Repository doesn't have a dedicated master branch, instead the main branch is assigned to the branch of active polkadot version, e.g. `polkadot-v0.9.13`.
-All deliveries should be made to the default branch unless they are intended for another temporary branch.
-
-When a pallet has been modified (version in .toml is updated), a new release tag must be created.
-Naming format for the tag is:
-*pallet-name*-**toml-version**/polkadot-**version**
-
-E.g. `pallet-dapps-staking-1.1.2/polkadot-v0.9.13`.
-
-### dApps-staking Pallets
-
-Since both `pallet-dapps-staking` and `pallet-precompile-dapps-staking` are tightly related, we use a direct dependency (**path**) from the precompile to FRAME pallet. Due to this, both pallet versions should be the same (incrementing one also means that other should be incremented).
-
-When creating tags, it is sufficient to just create a single tag for `pallet-dapps-staking` and reuse it for the precompiles in `Astar` repo.
-
-## Further Reading
-
-* [Official Documentation](https://docs.astar.network/)
-* [Whitepaper](https://github.com/AstarNetwork/plasmdocs/blob/master/wp/en.pdf)
-* [Whitepaper(JP)](https://github.com/AstarNetwork/plasmdocs/blob/master/wp/jp.pdf)
-* [Subtrate Developer Hub](https://substrate.dev/docs/en/)
-* [Substrate Glossary](https://substrate.dev/docs/en/knowledgebase/getting-started/glossary)
-* [Substrate Client Library Documentation](https://polkadot.js.org/docs/)
+```
+impl<T: Config> RewardDestinationInfo<T> {
+    // used to get the reward destination for a particular contract 
+    pub fn get_reward_destination(&self, contract_id: T::SmartContract) -> RewardDestination {
+        for i in 0..self.info.len() {
+            if self.info[i].0 == contract_id {
+                return self.info[i].1;
+           
+        }
+    }
+    // if RewardDestination not set, returns the default
+        return RewardDestination::default();
+            
+    }
+     
+    pub fn add_reward_destination(
+        &self,
+        contract_id: T::SmartContract,
+        destination: RewardDestination,
+    ) {
+        // find if the location exists for that particular destination
+        for i in 0..self.info.len() {
+            if self.info[i].0 == contract_id {
+                self.info[i].1 = destination;
+            }
+        }
+        
+        // if no location, then pushed into info 
+        self.info.push((contract_id, destination));
+    }
+}
+```

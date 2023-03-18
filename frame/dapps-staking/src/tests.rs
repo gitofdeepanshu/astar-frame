@@ -1709,6 +1709,203 @@ fn claim_is_ok() {
 }
 
 #[test]
+fn claim_delegated_is_ok() {
+    ExternalityBuilder::build().execute_with(|| {
+        initialize_first_block();
+        let first_developer = 1;
+        let first_staker = 3;
+        let first_delegatee_address = 5;
+
+        let first_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        let start_era = DappsStaking::current_era();
+
+        // registering contracts
+        assert_register(first_developer, &first_contract_id);
+
+        add_delegatee_address(first_staker, first_contract_id.clone(), first_delegatee_address).unwrap();
+
+        // bonding to get rewards for first_contract
+        assert_bond_and_stake(first_staker, &first_contract_id, 100);    
+        
+        // set reward_destination to DelegateBalance for first_contract
+        assert_set_reward_destination(first_staker, RewardDestination::DelegateBalance);
+
+        let eras_advanced = 3;
+        advance_to_era(start_era + eras_advanced);
+
+        assert_claim_staker(first_staker,&first_contract_id);
+
+    })
+}
+
+#[test]
+fn check_max_depth_working() {
+    ExternalityBuilder::build().execute_with(|| {
+        let first_developer = 1;
+
+        let first_staker = 11;
+
+        let first_delegatee= 21;
+        let second_delegatee= 22;
+        let third_delegatee= 23;
+        let fourth_delegatee= 24;
+        let fifth_delegatee= 25;
+        let sixth_delegatee= 26;
+
+        let first_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        assert_noop!(add_delegatee_address(first_staker, first_contract_id.clone(), first_delegatee),Error::<TestRuntime>::NotOperatedContract);
+
+        assert_register(first_developer, &first_contract_id);
+
+        // max depth allowed is 5
+        assert_ok!(add_delegatee_address(first_staker, first_contract_id.clone(), first_delegatee));
+        assert_ok!(add_delegatee_address(first_delegatee, first_contract_id.clone(), second_delegatee));
+        assert_ok!(add_delegatee_address(second_delegatee, first_contract_id.clone(), third_delegatee));
+        assert_ok!(add_delegatee_address(third_delegatee, first_contract_id.clone(), fourth_delegatee));
+        assert_ok!(add_delegatee_address(fourth_delegatee, first_contract_id.clone(), fifth_delegatee));
+        assert_ok!(add_delegatee_address(fifth_delegatee, first_contract_id.clone(), sixth_delegatee));
+      
+        //here final delegator is not sixth_delegatee but fifth_delegatee
+        assert_eq!(DappsStaking::check_delegate(first_staker, first_contract_id),Ok(fifth_delegatee),"Depth not working properly");
+
+})
+}
+
+#[test]
+fn check_remove_all_delegatee_for_delegator() {
+    ExternalityBuilder::build().execute_with(|| {
+        initialize_first_block();
+
+        let first_developer = 1;
+        let second_developer = 2;
+
+        let first_staker = 10;
+
+        let first_delegatee_address = 20;
+        let second_delegatee_address = 21;
+
+
+        let first_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+        let second_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x02));
+
+        let start_era = DappsStaking::current_era();
+
+        assert_register(first_developer, &first_contract_id);
+        assert_register(second_developer, &second_contract_id);
+
+        assert_bond_and_stake(first_staker, &first_contract_id, 100);
+        assert_bond_and_stake(first_staker, &second_contract_id, 100);
+
+        let eras_advanced = 3;
+        advance_to_era(start_era + eras_advanced);
+
+        // claim for 1 era with RewardDestination::StakeBalance
+        assert_claim_staker(first_staker,&first_contract_id);
+
+        // change RewardDestination
+        assert_set_reward_destination(first_staker, RewardDestination::DelegateBalance);
+
+        // claiming should give error because no mapping set for delegatee even after setting
+        // reward destination to DelegateBalance
+        assert_noop!(
+            DappsStaking::claim_staker(
+                RuntimeOrigin::signed(first_staker),
+                first_contract_id,
+            ),
+            Error::<TestRuntime>::DelegateeAccountNotSetForContract
+        );
+
+        add_delegatee_address(first_staker, first_contract_id.clone(), first_delegatee_address).unwrap();
+        add_delegatee_address(first_staker, second_contract_id.clone(), second_delegatee_address).unwrap();
+
+        assert_claim_staker(first_staker,&first_contract_id);
+        assert_claim_staker(first_staker,&second_contract_id);
+
+        // Now changing reward Destination should remove all the delegatee mapping
+        assert_set_reward_destination(first_staker, RewardDestination::FreeBalance);
+
+        assert!(DelegateInfo::<TestRuntime>::get(&first_staker,&first_contract_id).is_none(),"Mapping Removed");
+        assert!(DelegateInfo::<TestRuntime>::get(&first_staker,&second_contract_id).is_none(),"Mapping Removed");
+
+    })
+    
+}
+
+#[test]
+fn set_delegatee_is_ok() {
+    ExternalityBuilder::build().execute_with(|| {
+        initialize_first_block();
+
+        let first_developer = 1;
+        
+        let first_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        
+        let alice =1;
+        let bob = 2;
+        
+        // Contract must be registered is order to set delegatee
+        assert_noop!(DappsStaking::set_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id,
+            bob
+        ),Error::<TestRuntime>::NotOperatedContract);
+        
+        assert_register(first_developer, &first_contract_id);
+
+        assert!(DappsStaking::set_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id,
+            bob
+        ).is_ok());
+
+        assert_eq!(DelegateInfo::<TestRuntime>::get(&alice,&first_contract_id).unwrap(),bob);
+
+    })
+}
+
+#[test]
+fn remove_delegatee_is_ok() {
+    ExternalityBuilder::build().execute_with(|| {
+        initialize_first_block();
+
+        let first_developer = 1;
+        
+        let first_contract_id = MockSmartContract::Evm(H160::repeat_byte(0x01));
+
+        
+        let alice =1;
+        let bob = 2;
+        
+        //check can't remove until registered
+
+        assert_noop!(DappsStaking::remove_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id
+        ),
+        Error::<TestRuntime>::DelegateeAccountNotSetForContract);
+
+        assert_register(first_developer, &first_contract_id);
+
+        assert!(DappsStaking::set_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id,
+            bob
+        ).is_ok());
+
+        assert!(DappsStaking::remove_delegatee(
+            RuntimeOrigin::signed(alice),
+            first_contract_id
+        ).is_ok());
+
+        assert!(!DelegateInfo::<TestRuntime>::contains_key(&alice,&first_contract_id ));
+
+    })
+}
+
+#[test]
 fn claim_after_unregister_is_ok() {
     ExternalityBuilder::build().execute_with(|| {
         initialize_first_block();
@@ -1808,8 +2005,9 @@ fn claim_with_zero_staked_is_ok() {
         assert_bond_and_stake(staker, &contract_id, stake_value);
         advance_to_era(start_era + 1);
 
+        // NOTE: No need to ensure as this is deafult
         // ensure reward_destination is set to StakeBalance
-        assert_set_reward_destination(staker, RewardDestination::StakeBalance);
+        // assert_set_reward_destination(staker, RewardDestination::StakeBalance);
 
         // unstake all the tokens
         assert_unbond_and_unstake(staker, &contract_id, stake_value);
@@ -1865,8 +2063,9 @@ fn claiming_when_stakes_full_without_compounding_is_ok() {
             advance_to_era(start_era + offset * 5);
         }
 
+        // Note: No need to ensure a this is deafult value
         // Make sure reward_destination is set to StakeBalance
-        assert_set_reward_destination(staker_id, RewardDestination::StakeBalance);
+        // assert_set_reward_destination(staker_id, RewardDestination::StakeBalance);
 
         // claim and restake once, so there's a claim record for the for the current era in the stakes vec
         assert_claim_staker(staker_id, &contract_id);
@@ -1894,7 +2093,7 @@ fn changing_reward_destination_for_empty_ledger_is_not_ok() {
         assert_noop!(
             DappsStaking::set_reward_destination(
                 RuntimeOrigin::signed(staker),
-                RewardDestination::FreeBalance
+                RewardDestination::FreeBalance,
             ),
             Error::<TestRuntime>::NotActiveStaker
         );

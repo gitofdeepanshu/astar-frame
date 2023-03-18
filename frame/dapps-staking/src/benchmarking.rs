@@ -234,7 +234,6 @@ benchmarks! {
         let stakers = prepare_bond_and_stake::<T>(number_of_stakers, &contract_id, SEED)?;
         let staker = stakers[0].clone();
 
-        DappsStaking::<T>::set_reward_destination(RawOrigin::Signed(staker.clone()).into(), RewardDestination::StakeBalance)?;
         advance_to_era::<T>(claim_era + 1u32);
 
     }: claim_staker(RawOrigin::Signed(staker.clone()), contract_id.clone())
@@ -261,6 +260,39 @@ benchmarks! {
         let mut staker_info = DappsStaking::<T>::staker_info(&staker, &contract_id);
         let (era, _) = staker_info.claim();
         assert!(era > claim_era);
+    }
+
+    claim_staker_with_delegate {
+        initialize::<T>();
+        let (_, contract_id) = register_contract::<T>(1)?;
+
+        let number_of_stakers = 3;
+        let claim_era = DappsStaking::<T>::current_era();
+        let stakers = prepare_bond_and_stake::<T>(number_of_stakers, &contract_id, SEED)?;
+        let staker = stakers[0].clone();
+
+        let seed = 17;
+
+        let delegate1 : T::AccountId= account("pre_staker", 1, seed);
+        let delegate2 : T::AccountId= account("pre_staker", 2, seed);
+        let delegate3 : T::AccountId= account("pre_staker", 3, seed);
+        let delegate4 : T::AccountId= account("pre_staker", 4, seed);
+        let delegate5 : T::AccountId= account("pre_staker", 5, seed);
+
+        DappsStaking::<T>::set_delegatee_info(staker.clone(),contract_id.clone(),delegate1.clone())?;
+        DappsStaking::<T>::set_delegatee_info(delegate1.clone(),contract_id.clone(),delegate2.clone())?;
+        DappsStaking::<T>::set_delegatee_info(delegate2.clone(),contract_id.clone(),delegate3.clone())?;
+        DappsStaking::<T>::set_delegatee_info(delegate3.clone(),contract_id.clone(),delegate4.clone())?;
+        DappsStaking::<T>::set_delegatee_info(delegate4.clone(),contract_id.clone(),delegate5.clone())?;
+
+        DappsStaking::<T>::set_reward_destination(RawOrigin::Signed(staker.clone()).into(), RewardDestination::DelegateBalance)?;
+        advance_to_era::<T>(claim_era + 1u32);
+    }: claim_staker(RawOrigin::Signed(staker.clone()), contract_id.clone())
+    verify {
+        let mut staker_info = DappsStaking::<T>::staker_info(&staker, &contract_id);
+        let (era, _) = staker_info.claim();
+        assert!(era > claim_era);
+        assert_eq!(DappsStaking::<T>::check_delegate(staker,contract_id),Ok(delegate5));
     }
 
     claim_dapp {
@@ -296,6 +328,35 @@ benchmarks! {
     }: _(RawOrigin::Signed(staker.clone()), option)
     verify {
         assert_last_event::<T>(Event::<T>::RewardDestination(staker, option).into());
+    }
+
+    set_delegatee {
+        initialize::<T>();
+        let (_, contract_id) = register_contract::<T>(1)?;
+
+        let seed = 17;
+        let staker: T::AccountId = account("pre_staker", 1, seed);
+        let delegatee: T::AccountId = account("delegatee", 2, seed);
+    }: _(RawOrigin::Signed(staker.clone()),contract_id.clone(),delegatee.clone())
+    verify {
+        assert_last_event::<T>(Event::<T>::DelegatorSet(staker.clone(), contract_id.clone(),delegatee.clone()).into());
+        assert_eq!(DelegateInfo::<T>::get(&staker,&contract_id), Some(delegatee));
+    }
+
+
+    remove_delegatee {
+        initialize::<T>();
+        let (_, contract_id) = register_contract::<T>(1)?;
+
+        let seed = 17;
+        let staker: T::AccountId = account("pre_staker", 1, seed);
+        let delegatee: T::AccountId = account("delegatee", 2, seed);
+
+        DappsStaking::<T>::set_delegatee_info(staker.clone(),contract_id.clone(),delegatee.clone())?;
+    }: _(RawOrigin::Signed(staker.clone()),contract_id.clone())
+    verify {
+        assert!(!DelegateInfo::<T>::contains_key(&staker,&contract_id));
+        assert_last_event::<T>(Event::<T>::DelegateeRemoved(staker,contract_id,delegatee).into());
     }
 
 }

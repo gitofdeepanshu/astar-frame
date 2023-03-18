@@ -9,7 +9,7 @@
 use super::{pallet::pallet::Event, *};
 use frame_support::assert_ok;
 use mock::{EraIndex, *};
-use sp_runtime::{traits::AccountIdConversion, Perbill};
+use sp_runtime::{traits::AccountIdConversion, Perbill, DispatchError};
 
 /// Helper struct used to store information relevant to era/contract/staker combination.
 pub(crate) struct MemorySnapshot {
@@ -488,6 +488,12 @@ pub(crate) fn assert_nomination_transfer(
     }
 }
 
+/// Used to set the delegatee address for delegator
+pub(crate) fn add_delegatee_address(delegator: AccountId, contract_id:MockSmartContract<AccountId>,delegatee : AccountId ) -> Result<(),DispatchError> {
+    DappsStaking::set_delegatee_info(delegator,contract_id,delegatee)?;
+    assert_eq!(DelegateInfo::<TestRuntime>::get(&delegator, &contract_id).unwrap(), delegatee);
+    Ok(())
+}
 /// Used to perform claim for stakers with success assertion
 pub(crate) fn assert_claim_staker(claimer: AccountId, contract_id: &MockSmartContract<AccountId>) {
     let (claim_era, _) = DappsStaking::staker_info(&claimer, contract_id).claim();
@@ -497,7 +503,11 @@ pub(crate) fn assert_claim_staker(claimer: AccountId, contract_id: &MockSmartCon
     System::reset_events();
 
     let init_state_claim_era = MemorySnapshot::all(claim_era, contract_id, claimer);
-    let init_state_current_era = MemorySnapshot::all(current_era, contract_id, claimer);
+    let mut init_state_current_era = MemorySnapshot::all(current_era, contract_id, claimer);
+    if init_state_current_era.ledger.reward_destination == RewardDestination::DelegateBalance  {
+        let delegatee_account = DappsStaking::check_delegate(claimer, contract_id.clone()).unwrap();
+        init_state_current_era.free_balance += <TestRuntime as Config>::Currency::free_balance(&delegatee_account);
+    }
 
     // Calculate contract portion of the reward
     let (_, stakers_joint_reward) = DappsStaking::dev_stakers_split(
@@ -523,7 +533,12 @@ pub(crate) fn assert_claim_staker(claimer: AccountId, contract_id: &MockSmartCon
         contract_id.clone(),
     ));
 
-    let final_state_current_era = MemorySnapshot::all(current_era, contract_id, claimer);
+    let mut final_state_current_era = MemorySnapshot::all(current_era, contract_id, claimer);
+
+    if final_state_current_era.ledger.reward_destination == RewardDestination::DelegateBalance  {
+        let delegatee_account = DappsStaking::check_delegate(claimer, contract_id.clone()).unwrap();
+        final_state_current_era.free_balance += <TestRuntime as Config>::Currency::free_balance(&delegatee_account);
+    }
 
     // assert staked and free balances depending on restake check,
     assert_restake_reward(
@@ -677,7 +692,7 @@ pub(crate) fn assert_set_reward_destination(
 ) {
     assert_ok!(DappsStaking::set_reward_destination(
         RuntimeOrigin::signed(account_id),
-        reward_destination
+        reward_destination,
     ));
 
     System::assert_last_event(mock::RuntimeEvent::DappsStaking(Event::RewardDestination(
